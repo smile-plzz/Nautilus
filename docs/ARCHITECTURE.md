@@ -5,7 +5,7 @@
 - A single Node.js HTTP server serves the website and JSON API.
 - SQLite stores one operator listing, room categories, departure dates, date-specific prices, holds, bookings and price offers.
 - The public catalog is filtered to the published Nautilus showcase listing. Owner routes are password protected.
-- Render can mount SQLite on its persistent disk.
+- The current Render demo uses an ephemeral filesystem; sample data may reset after restarts, spin-down or redeployment. A real service needs persistent storage or managed Postgres.
 
 This is adapted from HaorBoard's prototype engine, with a Nautilus-only public catalog and independent database path.
 

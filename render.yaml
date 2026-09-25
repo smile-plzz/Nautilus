@@ -2,7 +2,7 @@ services:
   - type: web
     name: nautilus-houseboat
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
@@ -10,12 +10,8 @@ services:
       - key: NODE_ENV
         value: production
       - key: DATA_DIR
-        value: /var/data
+        value: data
       - key: ADMIN_PASSWORD
-        sync: false
+        generateValue: true
       - key: SESSION_SECRET
         generateValue: true
-    disk:
-      name: nautilus-houseboat-data
-      mountPath: /var/data
-      sizeGB: 1

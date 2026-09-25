@@ -37,15 +37,15 @@ The integration test checks the single-boat catalog, room holds and conflicts, c
 
 ## Deploy on Render
 
-The included render.yaml creates a Node web service with a persistent disk. If configuring a Web Service manually, set:
+The included render.yaml creates a free Node web service for previewing the demo. Its SQLite data is ephemeral and can be lost when Render restarts, spins down or redeploys the service. Do not use this setup for real reservations. If configuring a Web Service manually, set:
 
 - Build command: npm install
 - Start command: npm start
 - ADMIN_PASSWORD: a long private password
 - SESSION_SECRET: a randomly generated secret, different from the password
-- DATA_DIR: a directory on a persistent disk, such as /var/data
+- DATA_DIR: data (ephemeral on the free plan)
 
-Never commit production secrets. Verify the owner login, persistent disk and a restart before loading approved inventory.
+Never commit secrets. The Blueprint generates the owner password and session secret. The free service may sleep after idle time and take about a minute to wake. For real inventory, use a paid service with persistent storage or managed Postgres, after approving the cost and completing launch readiness.
 
 ## Market fit and limits
 
