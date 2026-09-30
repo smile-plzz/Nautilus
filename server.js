@@ -1,12 +1,18 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
+// Vercel bundles are read-only. SQLite here is strictly an ephemeral demo store.
+const IS_VERCEL = process.env.VERCEL === '1';
+const DATA_DIR = IS_VERCEL
+  ? path.join(os.tmpdir(), 'nautilus-demo')
+  : process.env.DATA_DIR || path.join(ROOT, 'data');
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA !== 'false';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'nautilus.sqlite'));
@@ -174,7 +180,7 @@ function listText(value) {
   const text=optionalText(value,1200);
   return text===null?null:text.split(/[|\n]/).map(s=>s.trim()).filter(Boolean).join('|');
 }
-function secret() { return process.env.SESSION_SECRET || 'local-development-only-secret'; }
+function secret() { return SESSION_SECRET; }
 function token() {
   const body=Buffer.from(JSON.stringify({exp:now()+12*3600000})).toString('base64url');
   return body+'.'+crypto.createHmac('sha256',secret()).update(body).digest('base64url');
@@ -280,13 +286,15 @@ async function api(req,res,url) {
     res.writeHead(200,{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="nautilus-bookings.csv"','cache-control':'no-store'});
     return res.end('\uFEFF'+[fields.map(cell).join(','),...data.map(row=>fields.map(k=>cell(row[k])).join(','))].join('\r\n'));
   }
-  if (req.method==='GET' && route==='/api/health') return send(res,200,{ok:true});
+  if (req.method==='GET' && route==='/api/health') return send(res,200,{ok:true,demo:true,storage:IS_VERCEL?'ephemeral':'local',owner_configured:Boolean(process.env.ADMIN_PASSWORD && (process.env.NODE_ENV!=='production'||process.env.SESSION_SECRET))});
   if (req.method==='GET' && route==='/api/catalog') return send(res,200,catalog());
   if (req.method==='GET' && route==='/api/session') return send(res,200,{admin:isAdmin(req)});
   if (req.method==='POST' && route==='/api/login') {
     const input=await body(req);
     const password=process.env.ADMIN_PASSWORD;
-    if (!password || typeof input.password!=='string' || Buffer.byteLength(input.password)!==Buffer.byteLength(password) ||
+    if (!password || (process.env.NODE_ENV==='production' && !process.env.SESSION_SECRET))
+      throw problem(503,'Owner access is not configured. Set ADMIN_PASSWORD and SESSION_SECRET in the hosting environment, then redeploy.');
+    if (typeof input.password!=='string' || Buffer.byteLength(input.password)!==Buffer.byteLength(password) ||
       !crypto.timingSafeEqual(Buffer.from(input.password),Buffer.from(password))) throw problem(401,'Incorrect password');
     return send(res,200,{admin:true},{'set-cookie':`hb_owner=${token()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${process.env.NODE_ENV==='production'?'; Secure':''}`});
   }
@@ -557,10 +565,11 @@ const server=http.createServer(async(req,res)=>{
     send(res,e.status||500,{error:e.status?e.message:'Unexpected server error'});
   }
 });
-if (process.env.NODE_ENV==='production') {
+if (process.env.NODE_ENV==='production' && !IS_VERCEL) {
   const missing=['ADMIN_PASSWORD','SESSION_SECRET'].filter(key=>!process.env[key]);
-  if (missing.length) throw new Error('Missing Render environment variable(s): '+missing.join(', ')+'. Add them in the service Environment settings and redeploy.');
+  if (missing.length) throw new Error('Missing hosting environment variable(s): '+missing.join(', ')+'. Add them in the service Environment settings and redeploy.');
 }
 const port=Number(process.env.PORT)||3000;
-if (process.env.NODE_ENV!=='test') server.listen(port,()=>console.log('Nautilus site listening on '+port));
+if (process.env.NODE_ENV!=='test' && !IS_VERCEL) server.listen(port,()=>console.log('Nautilus site listening on '+port));
 export {server,db};
+export default server;

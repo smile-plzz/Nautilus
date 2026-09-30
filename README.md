@@ -65,3 +65,9 @@ A single-operator site can improve product education, credibility and the bookin
 ## Before real bookings
 
 This build is a working software prototype, not a live transaction system. Before taking money, Nautilus must approve the public content, inventory, trip terms, cancellation/refund policy and responsibilities; a payment provider and payout/reconciliation flow must be integrated; customer receipts and operator notifications must work; and live deployment must be verified with test payments and real trip operations.
+
+## Vercel owner preview
+
+The Node HTTP server is exported for Vercel, with local listening disabled in the Vercel runtime. On Vercel, SQLite uses `/tmp/nautilus-demo`, even if a relative `DATA_DIR=data` was configured for Render. The public preview can load without owner credentials; owner access stays disabled until both `ADMIN_PASSWORD` and `SESSION_SECRET` are configured in the production environment and the service is redeployed. `/api/health` reports whether owner access is configured.
+
+**Temporary preview only:** `/tmp` storage is instance-local, can reset on cold starts or redeploys, and is not shared across scaled function instances. Sample inventory, bookings and content edits can therefore reset or differ between instances. Real booking inventory and reliable saved owner edits require an external durable database.
