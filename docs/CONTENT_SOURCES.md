@@ -40,3 +40,6 @@ No primary source reviewed for this prototype substantiated:
 - Whether the public listing's refund policy is the current policy for a direct Nautilus booking.
 
 Those sections remain clearly identified as content to supply or confirm; they are not filled with invented claims.
+## Owner preview photographs (30 September 2026)
+
+The local `public/images/nautilus-1.jpg` through `nautilus-6.jpg` files came from the image gallery on https://www.bdcruise.com/nautilus/ . Original URLs follow `https://www.bdcruise.com/wp-content/uploads/2025/09/d-{1..6}.jpg`. Images were resized for page delivery and retain existing publisher marks. The page attributes the gallery to the public listing. These are preview assets: public availability does not establish reuse rights; obtain owner/publisher permission or replace before official launch. No certificate or rating is inferred from the listing or its photographs.

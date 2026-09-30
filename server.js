@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   amount INTEGER NOT NULL, fee INTEGER NOT NULL, guest_name TEXT NOT NULL,
   guest_phone TEXT NOT NULL, terms_snapshot TEXT NOT NULL, created_at INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'confirmed',
-  UNIQUE(departure_id, room_id)
+  CHECK(status IN ('confirmed','cancelled'))
 );
 CREATE TABLE IF NOT EXISTS offers (
   id TEXT PRIMARY KEY, departure_id INTEGER NOT NULL REFERENCES departures(id),
@@ -55,6 +55,40 @@ CREATE TABLE IF NOT EXISTS departure_prices (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_hold ON holds(departure_id, room_id) WHERE status='active';
 `);
+// Migrate the original all-status uniqueness so a cancelled cabin can be rebooked.
+if (db.prepare("SELECT sql FROM sqlite_master WHERE name='bookings'").get().sql.includes('UNIQUE(departure_id, room_id)')) {
+  db.exec(`BEGIN IMMEDIATE;
+    ${db.prepare("SELECT sql FROM sqlite_master WHERE name='bookings'").get().sql.replace('CREATE TABLE bookings', 'CREATE TABLE bookings_new').replace('UNIQUE(departure_id, room_id)', "CHECK(status IN ('confirmed','cancelled'))")};
+    INSERT INTO bookings_new SELECT * FROM bookings;
+    DROP TABLE bookings;
+    ALTER TABLE bookings_new RENAME TO bookings;
+    CREATE UNIQUE INDEX booking_reference ON bookings(id);
+    COMMIT;`);
+}
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS one_confirmed_booking ON bookings(departure_id,room_id) WHERE status='confirmed';
+  CREATE TABLE IF NOT EXISTS site_content (id INTEGER PRIMARY KEY CHECK(id=1), content TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, action TEXT NOT NULL, reference TEXT NOT NULL, created_at INTEGER NOT NULL);
+`);
+const defaultContent = {
+  story: 'Nautilus brings the comfort of a private cabin to a journey through Tanguar Haor. Gather on the rooftop, share a meal and explore the waterways of Sunamganj at a slower pace.',
+  contact_phone: '', contact_email: '', whatsapp: '',
+  hero_image: '/images/nautilus-6.jpg',
+  gallery: [
+    {url:'/images/nautilus-6.jpg',caption:'Nautilus on the water'},
+    {url:'/images/nautilus-3.jpg',caption:'A look inside a cabin'},
+    {url:'/images/nautilus-5.jpg',caption:'Cabin details'},
+    {url:'/images/nautilus-4.jpg',caption:'An evening aboard'}
+  ],
+  reviews: [], credentials: [], crew: [],
+  cancellation_policy: 'Cancellation and weather disruption terms will be confirmed by Nautilus before live bookings open.',
+  boarding_notes: 'The published itinerary starts at Saheb Bari Ghat, Sunamganj. Confirm the meeting time, exact boarding location and route with the trip manager.',
+  privacy_note: 'This preview stores the name and phone number entered in sample bookings and offers so the demo operator can review them. Do not enter sensitive information. No card details or payments are collected.'
+};
+const content = () => ({...defaultContent, ...JSON.parse(db.prepare('SELECT content FROM site_content WHERE id=1').get()?.content || '{}')});
+const audit = (action,reference) => db.prepare('INSERT INTO audit_log(action,reference,created_at) VALUES (?,?,?)').run(action,reference,Date.now());
+const safeURL = value => typeof value==='string' && ( /^\/images\/[a-zA-Z0-9._-]+$/.test(value) || (()=>{try{return new URL(value).protocol==='https:'}catch{return false}})());
+const localDate = () => new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Dhaka',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+
 // Add optional presentation fields without disturbing existing demo bookings.
 for (const [name,type] of [
   ['source_url',"TEXT NOT NULL DEFAULT ''"],
@@ -125,7 +159,7 @@ function inventory(departureId,roomId) {
     LEFT JOIN departure_prices p ON p.departure_id=d.id AND p.room_id=r.id
     WHERE d.id=? AND r.id=?`,departureId,roomId);
   if (!item || item.departure_status!=='open' || !item.room_published || !item.boat_published ||
-    item.departure_date < new Date().toISOString().slice(0,10)) throw problem(404,'Room or departure unavailable');
+    item.departure_date < localDate()) throw problem(404,'Room or departure unavailable');
   return item;
 }
 function available(departureId,roomId) {
@@ -151,13 +185,13 @@ function isAdmin(req) {
   const [body,sig]=raw.slice(9).split('.');
   if (!body || !sig) return false;
   const expected=crypto.createHmac('sha256',secret()).update(body).digest('base64url');
-  if (sig.length!==expected.length || !crypto.timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return false;
+  if (Buffer.byteLength(sig)!==Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return false;
   try { return JSON.parse(Buffer.from(body,'base64url').toString()).exp>now(); } catch { return false; }
 }
 function requireAdmin(req) { if (!isAdmin(req)) throw problem(401,'Owner login required'); }
 async function body(req) {
   let text='';
-  for await (const chunk of req) { text+=chunk; if (text.length>16000) throw problem(413,'Request too large'); }
+  for await (const chunk of req) { text+=chunk; if (text.length>64000) throw problem(413,'Request too large'); }
   try { return JSON.parse(text||'{}'); } catch { throw problem(400,'Invalid JSON'); }
 }
 function send(res,status,data,headers={}) {
@@ -169,7 +203,7 @@ function catalog() {
   const boats=rows('SELECT * FROM boats WHERE published=1 AND showcase=1 ORDER BY id LIMIT 1').map(b=>({
     ...b, highlights:b.highlights.split('|'),
     rooms:rows('SELECT * FROM rooms WHERE boat_id=? AND published=1 ORDER BY capacity',b.id).map(r=>({...r,features:r.features.split('|')})),
-    departures:rows("SELECT * FROM departures WHERE boat_id=? AND status='open' AND departure_date>=date('now') ORDER BY departure_date",b.id)
+    departures:rows("SELECT * FROM departures WHERE boat_id=? AND status='open' AND departure_date>=? ORDER BY departure_date",b.id,localDate())
       .map(d=>({...d,prices:Object.fromEntries(rows('SELECT room_id,price_per_person FROM departure_prices WHERE departure_id=?',d.id).map(p=>[p.room_id,p.price_per_person])),
         unavailable:rows(`SELECT room_id FROM bookings WHERE departure_id=? AND status='confirmed'
         UNION SELECT room_id FROM holds WHERE departure_id=? AND status='active' AND expires_at>?`,d.id,d.id,now()).map(x=>x.room_id)}))
@@ -179,13 +213,80 @@ function catalog() {
 
 async function api(req,res,url) {
   const route=url.pathname;
+  if (req.method==='GET' && route==='/api/content') return send(res,200,content());
+  if (req.method==='POST' && route==='/api/owner/content') {
+    requireAdmin(req); const input=await body(req), next={};
+    for (const key of ['story','cancellation_policy','boarding_notes','privacy_note']) {
+      next[key]=optionalText(input[key],2500);
+      if (next[key]===null) throw problem(400,'Invalid '+key);
+    }
+    for (const key of ['contact_phone','contact_email','whatsapp']) {
+      next[key]=optionalText(input[key],180);
+      if (next[key]===null) throw problem(400,'Invalid contact details');
+    }
+    if (next.contact_phone && !/^\+?[0-9 ()-]{8,25}$/.test(next.contact_phone)) throw problem(400,'Invalid contact phone');
+    if (next.whatsapp && !/^[0-9]{8,15}$/.test(next.whatsapp)) throw problem(400,'WhatsApp needs digits including country code');
+    if (next.contact_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.contact_email)) throw problem(400,'Invalid email');
+    if (!safeURL(input.hero_image)) throw problem(400,'Use a local image or HTTPS image URL');
+    next.hero_image=input.hero_image;
+    for (const [key,fields] of Object.entries({gallery:['url','caption'],reviews:['name','quote','source'],credentials:['title','issuer','url'],crew:['name','role']})) {
+      if (!Array.isArray(input[key]) || input[key].length>12) throw problem(400,'Invalid '+key);
+      next[key]=input[key].map(item=>{
+        const result={};
+        for (const field of fields) {
+          result[field]=optionalText(item[field],field==='quote'?1000:400);
+          if(result[field]===null)throw problem(400,'Invalid '+key+' entry');
+        }
+        if ('url' in result && result.url && !safeURL(result.url)) throw problem(400,'Use HTTPS links');
+        if(key==='gallery' && !result.url)throw problem(400,'Gallery image URL required');
+        if(key==='reviews' && (!result.name || !result.quote || !result.source))throw problem(400,'Reviews need a name, quote and source');
+        return result;
+      });
+    }
+    db.prepare('INSERT INTO site_content(id,content) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content').run(JSON.stringify(next));
+    audit('content.updated','site');
+    return send(res,200,next);
+  }
+  if (req.method==='POST' && route==='/api/holds/release') {
+    const input=await body(req);
+    if (!requiredText(input.hold_id,80)) throw problem(400,'Hold reference required');
+    db.prepare("UPDATE holds SET status='released' WHERE id=? AND status='active'").run(input.hold_id);
+    return send(res,200,{released:true});
+  }
+  if (req.method==='POST' && route==='/api/guest/lookup') {
+    const input=await body(req); expire();
+    const id=requiredText(input.reference,80),phone=requiredText(input.phone,30);
+    if (!id || !phone) throw problem(400,'Enter your reference and phone number');
+    const kind=id.startsWith('OFFER-')?'offer':'booking';
+    const item=statement(`SELECT x.*,r.name room_name,d.departure_date,d.return_date,b.name boat_name,b.departure_point
+      FROM ${kind==='offer'?'offers':'bookings'} x JOIN rooms r ON r.id=x.room_id JOIN departures d ON d.id=x.departure_id
+      JOIN boats b ON b.id=r.boat_id WHERE x.id=? AND x.guest_phone=?`,id,phone);
+    if (!item) throw problem(404,'Reference and phone number do not match');
+    return send(res,200,{kind,item,demo:true});
+  }
+  if (req.method==='POST' && route==='/api/owner/bookings/cancel') {
+    requireAdmin(req); const input=await body(req);
+    const result=db.prepare("UPDATE bookings SET status='cancelled' WHERE id=? AND status='confirmed' AND amount>0").run(input.booking_id || '');
+    if(!result.changes)throw problem(404,'Active sample booking not found');
+    audit('booking.cancelled',input.booking_id);
+    return send(res,200,{cancelled:true,demo:true});
+  }
+  if (req.method==='GET' && route==='/api/owner/export') {
+    requireAdmin(req);
+    const data=rows(`SELECT x.id,x.status,x.guest_name,x.guest_phone,d.departure_date,r.name room,x.guest_count,x.amount
+      FROM bookings x JOIN departures d ON d.id=x.departure_id JOIN rooms r ON r.id=x.room_id ORDER BY x.created_at DESC`);
+    const fields=['id','status','guest_name','guest_phone','departure_date','room','guest_count','amount'];
+    const cell=value=>'"'+String(value??'').replace(/^[=+@-]/,"'$&").replaceAll('"','""')+'"';
+    res.writeHead(200,{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="nautilus-bookings.csv"','cache-control':'no-store'});
+    return res.end('\uFEFF'+[fields.map(cell).join(','),...data.map(row=>fields.map(k=>cell(row[k])).join(','))].join('\r\n'));
+  }
   if (req.method==='GET' && route==='/api/health') return send(res,200,{ok:true});
   if (req.method==='GET' && route==='/api/catalog') return send(res,200,catalog());
   if (req.method==='GET' && route==='/api/session') return send(res,200,{admin:isAdmin(req)});
   if (req.method==='POST' && route==='/api/login') {
     const input=await body(req);
     const password=process.env.ADMIN_PASSWORD;
-    if (!password || typeof input.password!=='string' || input.password.length!==password.length ||
+    if (!password || typeof input.password!=='string' || Buffer.byteLength(input.password)!==Buffer.byteLength(password) ||
       !crypto.timingSafeEqual(Buffer.from(input.password),Buffer.from(password))) throw problem(401,'Incorrect password');
     return send(res,200,{admin:true},{'set-cookie':`hb_owner=${token()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${process.env.NODE_ENV==='production'?'; Secure':''}`});
   }
@@ -210,7 +311,7 @@ async function api(req,res,url) {
       const id=uid('HOLD'),expires_at=now()+10*60000;
       db.prepare('INSERT INTO holds (id,departure_id,room_id,guest_count,amount,offer_id,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
         .run(id,departureId,roomId,guestCount,amount,offerId,expires_at,now());
-      return {id,expires_at,amount,fee:feeFor(amount),room:item.room_name,boat:item.boat_name,date:item.departure_date,demo:true};
+      return {id,expires_at,amount,guest_count:guestCount,fee:feeFor(amount),room:item.room_name,boat:item.boat_name,date:item.departure_date,demo:true};
     });
     return send(res,201,hold);
   }
@@ -224,7 +325,7 @@ async function api(req,res,url) {
       if (!hold||hold.expires_at<=now()) throw problem(409,'Checkout hold expired; select your room again');
       const item=inventory(hold.departure_id,hold.room_id);
       if (hold.guest_count>item.capacity) throw problem(409,'Room capacity changed during checkout');
-      if (statement('SELECT id FROM bookings WHERE departure_id=? AND room_id=?',hold.departure_id,hold.room_id))
+      if (statement('SELECT id FROM bookings WHERE departure_id=? AND room_id=? AND status=\'confirmed\'',hold.departure_id,hold.room_id))
         throw problem(409,'Room already booked');
       const id=uid('HB');
       db.prepare('INSERT INTO bookings (id,departure_id,room_id,guest_count,amount,fee,guest_name,guest_phone,terms_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
@@ -263,6 +364,7 @@ async function api(req,res,url) {
     return send(res,201,offer);
   }
   if (req.method==='GET' && route.startsWith('/api/offers/')) {
+    expire();
     const o=statement('SELECT * FROM offers WHERE id=?',route.split('/')[3]);
     if (!o) throw problem(404,'Offer not found');
     return send(res,200,{id:o.id,departure_id:o.departure_id,room_id:o.room_id,guest_count:o.guest_count,
@@ -336,7 +438,7 @@ async function api(req,res,url) {
     const departureId=positiveInt(input.departure_id),roomId=positiveInt(input.room_id),
       price=positiveInt(input.price_per_person);
     if (!departureId||!roomId||!price||price>1000000||
-      !statement('SELECT id FROM departures WHERE id=? AND departure_date>=date(\'now\')',departureId) ||
+      !statement('SELECT id FROM departures WHERE id=? AND departure_date>=?',departureId,localDate()) ||
       !statement('SELECT r.id FROM rooms r JOIN departures d ON d.boat_id=r.boat_id WHERE d.id=? AND r.id=?',departureId,roomId))
       throw problem(400,'Choose a future departure, its room and a valid rate');
     db.prepare(`INSERT INTO departure_prices(departure_id,room_id,price_per_person) VALUES (?,?,?)
@@ -350,7 +452,7 @@ async function api(req,res,url) {
     if (!id||!['open','closed'].includes(status)) throw problem(400,'Choose a departure and status');
     const departure=statement('SELECT * FROM departures WHERE id=?',id);
     if (!departure) throw problem(404,'Departure not found');
-    if (status==='open'&&departure.departure_date<new Date().toISOString().slice(0,10))
+    if (status==='open'&&departure.departure_date<localDate())
       throw problem(409,'Past departures cannot be opened');
     db.prepare('UPDATE departures SET status=? WHERE id=?').run(status,id);
     return send(res,200,{id,status});
@@ -367,8 +469,8 @@ async function api(req,res,url) {
     requireAdmin(req); const input=await body(req);
     const boatId=positiveInt(input.boat_id),date=input.departure_date;
     if (!boatId||!statement('SELECT id FROM boats WHERE id=?',boatId)||typeof date!=='string'||
-      !/^\d{4}-\d{2}-\d{2}$/.test(date)||date<=new Date().toISOString().slice(0,10)||
-      Number.isNaN(Date.parse(date+'T00:00:00Z'))) throw problem(400,'Choose a boat and future date');
+      !/^\d{4}-\d{2}-\d{2}$/.test(date)||date<=localDate()||
+      Number.isNaN(Date.parse(date+'T00:00:00Z')) || new Date(date+'T00:00:00Z').toISOString().slice(0,10)!==date) throw problem(400,'Choose a boat and future date');
     const returnDate=new Date(Date.parse(date+'T00:00:00Z')+86400000).toISOString().slice(0,10);
     if (statement('SELECT id FROM departures WHERE boat_id=? AND departure_date=?',boatId,date)) throw problem(409,'Departure already exists');
     const result=db.prepare('INSERT INTO departures (boat_id,departure_date,return_date) VALUES (?,?,?)').run(boatId,date,returnDate);
@@ -419,6 +521,7 @@ async function api(req,res,url) {
   if (req.method==='GET' && route==='/api/owner/overview') {
     requireAdmin(req); expire();
     return send(res,200,{
+      audit:rows('SELECT * FROM audit_log ORDER BY id DESC LIMIT 30'),
       offers:rows(`SELECT o.*,b.name boat_name,r.name room_name,d.departure_date FROM offers o
         JOIN rooms r ON r.id=o.room_id JOIN boats b ON b.id=r.boat_id JOIN departures d ON d.id=o.departure_id
         ORDER BY o.created_at DESC LIMIT 80`),
@@ -430,10 +533,13 @@ async function api(req,res,url) {
   throw problem(404,'Not found');
 }
 
-const MIME={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
+const MIME={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.jpg':'image/jpeg','.png':'image/png','.webp':'image/webp','.ico':'image/x-icon'};
 const server=http.createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,'http://localhost');
+    res.setHeader('X-Content-Type-Options','nosniff');
+    res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options','SAMEORIGIN');
     if (req.method==='POST' && req.headers.origin && new URL(req.headers.origin).host!==req.headers.host)
       throw problem(403,'Cross-origin request rejected');
     if (url.pathname.startsWith('/api/')) return await api(req,res,url);

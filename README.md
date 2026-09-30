@@ -10,6 +10,10 @@ The multi-boat marketplace helps travelers discover and compare operators. A ded
 
 That is a product hypothesis, not evidence of demand. The strongest first test is to let Nautilus review the page and data, then measure whether direct visitors understand the offer and complete verified booking requests with less back-and-forth.
 
+## Owner presentation build
+
+The prototype now includes real sourced boat imagery, a responsive mobile menu and booking shortcut, a gallery lightbox, guest booking/offer lookup, printable sample confirmations, checkout hold countdown and release, cancellation/rebooking, booking CSV export, and an owner-editable content screen for story, contact details, gallery, crew, credentials and sourced reviews. Owner content is stored in SQLite alongside inventory. See [the meeting walkthrough](docs/OWNER_DEMO.md). Payments and messages remain simulated/unconnected.
+
 ## What the page contains
 
 - A Nautilus-first landing page, trip narrative and sample route.
